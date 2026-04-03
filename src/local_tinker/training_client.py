@@ -27,6 +27,9 @@ class TrainingClient:
         model: torch.nn.Module,
         tokenizer: PreTrainedTokenizerBase,
         device: torch.device,
+        auto_checkpoint_every: int | None = None,
+        checkpoint_dir: str = "./checkpoints",
+        max_checkpoints: int = 3,
     ) -> None:
         self._model = model
         self._tokenizer = tokenizer
@@ -34,6 +37,9 @@ class TrainingClient:
         self._optimizer: torch.optim.AdamW | None = None
         self._current_lr: float | None = None
         self._step: int = 0
+        self._auto_checkpoint_every = auto_checkpoint_every
+        self._checkpoint_dir = checkpoint_dir
+        self._max_checkpoints = max_checkpoints
 
     # -- public API ----------------------------------------------------
 
@@ -91,6 +97,14 @@ class TrainingClient:
         self._optimizer.step()  # type: ignore[union-attr]
         self._optimizer.zero_grad()  # type: ignore[union-attr]
         self._step += 1
+
+        # Auto-checkpoint
+        if (
+            self._auto_checkpoint_every
+            and self._step % self._auto_checkpoint_every == 0
+        ):
+            self._auto_checkpoint()
+
         return OptimStepResponse(step=self._step, lr=params.lr)
 
     def get_step(self) -> int:
@@ -109,6 +123,39 @@ class TrainingClient:
             self._model.load_adapter(path, adapter_name="default")
         else:
             raise TypeError("Model is not a PeftModel; cannot load adapter weights.")
+
+    def get_reference_log_probs(self, data: list[Datum]) -> torch.Tensor:
+        """Compute per-token log-probs under the base model (LoRA disabled).
+
+        Useful for DPO and PPO KL penalties that need reference log-probs.
+
+        Args:
+            data: Batch of examples.
+
+        Returns:
+            (batch, seq_len) tensor of log-probabilities from the base model.
+        """
+        from peft import PeftModel
+
+        input_ids, labels, attention_mask = self._collate(data)
+
+        self._model.eval()
+        with torch.no_grad():
+            if isinstance(self._model, PeftModel):
+                with self._model.disable_adapter():
+                    outputs = self._model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                    )
+            else:
+                outputs = self._model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+
+        from .utils.logprobs import get_per_token_logprobs
+
+        return get_per_token_logprobs(outputs.logits, labels)
 
     # -- internal helpers ----------------------------------------------
 
@@ -159,6 +206,26 @@ class TrainingClient:
                 eps=params.eps,
             )
             self._current_lr = params.lr
+
+    def _auto_checkpoint(self) -> None:
+        """Save a checkpoint and rotate old ones."""
+        import shutil
+        from pathlib import Path
+
+        from .checkpoint import save_checkpoint
+
+        ckpt_path = Path(self._checkpoint_dir) / f"step-{self._step}"
+        save_checkpoint(self, str(ckpt_path))
+
+        # Rotate: keep only the most recent max_checkpoints
+        root = Path(self._checkpoint_dir)
+        if root.is_dir():
+            ckpt_dirs = sorted(
+                [d for d in root.iterdir() if d.is_dir() and (d / "meta.json").exists()],
+                key=lambda d: d.stat().st_mtime,
+            )
+            while len(ckpt_dirs) > self._max_checkpoints:
+                shutil.rmtree(ckpt_dirs.pop(0))
 
     def _grad_norm(self) -> float | None:
         """Compute the L2 norm of gradients on trainable parameters."""

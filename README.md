@@ -98,6 +98,65 @@ graph LR
     end
 ```
 
+## Loss Function Hierarchy
+
+```mermaid
+classDiagram
+    class LossFunction {
+        <<abstract>>
+        +compute(logits, labels, **kwargs) Tensor
+    }
+    class CrossEntropyLoss {
+        +mask_prompt_tokens: bool
+        +compute(logits, labels) Tensor
+    }
+    class PPOLoss {
+        +clip_range: float
+        +kl_coeff: float
+        +compute(logits, labels, old_log_probs, advantages) Tensor
+    }
+    class GRPOLoss {
+        +clip_range: float
+        +kl_coeff: float
+        +compute(logits, labels, old_log_probs, rewards, group_size) Tensor
+    }
+    class DPOLoss {
+        +beta: float
+        +compute(logits, labels, ref_chosen_log_probs, ref_rejected_log_probs) Tensor
+    }
+    class CustomLoss {
+        +fn: Callable
+        +compute(logits, labels) Tensor
+    }
+
+    LossFunction <|-- CrossEntropyLoss
+    LossFunction <|-- PPOLoss
+    LossFunction <|-- GRPOLoss
+    LossFunction <|-- DPOLoss
+    LossFunction <|-- CustomLoss
+```
+
+## RL Training Loop
+
+```mermaid
+graph LR
+    subgraph "1. Rollout"
+        E["Environment<br/>(ProblemEnv)"] -->|observation| SC["SamplingClient<br/>.sample()"]
+        SC -->|action| E
+        E -->|reward| T["Trajectory"]
+    end
+
+    subgraph "2. Advantage"
+        T --> CA["compute_advantages<br/>(GRPO)"]
+        CA --> D["Training Data<br/>(list[Datum])"]
+    end
+
+    subgraph "3. Policy Update"
+        D --> FB["TrainingClient<br/>.forward_backward()"]
+        FB --> OS["TrainingClient<br/>.optim_step()"]
+    end
+```
+
 ---
 
 ## Installation
@@ -235,10 +294,10 @@ result = tc.forward_backward(data, loss_fn)
 | Loss | Description |
 |---|---|
 | `CrossEntropyLoss` | Standard next-token prediction (SFT). Supports prompt masking via `-100` labels. |
-| `DPOLoss` | Direct Preference Optimization *(Phase 2)* |
-| `PPOLoss` | PPO clipped surrogate objective *(Phase 2)* |
-| `GRPOLoss` | Group Relative Policy Optimization *(Phase 2)* |
-| `CustomLoss` | Wrap any `callable(logits, labels) -> scalar` *(Phase 2)* |
+| `DPOLoss` | Direct Preference Optimization — chosen vs rejected pairs with reference model. |
+| `PPOLoss` | PPO clipped surrogate objective with optional KL penalty. |
+| `GRPOLoss` | Group Relative Policy Optimization — normalizes rewards within groups. |
+| `CustomLoss` | Wrap any `callable(logits, labels) -> scalar` as a loss function. |
 
 ---
 
@@ -333,22 +392,56 @@ local-tinker/
 ├── src/local_tinker/
 │   ├── __init__.py                    # Public API exports
 │   ├── types.py                       # Pydantic types & config objects
+│   ├── config.py                      # (reserved)
+│   ├── model_registry.py              # Supported model catalog + VRAM estimates
 │   ├── service_client.py              # ServiceClient + TrainingRun
 │   ├── training_client.py             # TrainingClient (forward_backward, optim_step)
 │   ├── sampling_client.py             # SamplingClient (sample, batch_sample)
+│   ├── checkpoint.py                  # Save/load/list LoRA checkpoints
+│   ├── weights.py                     # Merge LoRA → full model, export, push to Hub
 │   ├── losses/
 │   │   ├── base.py                    # Abstract LossFunction interface
-│   │   └── cross_entropy.py           # SFT cross-entropy loss
-│   ├── utils/                         # GPU, tokenizer, logging utilities
-│   └── cli/                           # CLI commands
+│   │   ├── cross_entropy.py           # SFT cross-entropy loss
+│   │   ├── dpo.py                     # Direct Preference Optimization
+│   │   ├── ppo.py                     # PPO clipped surrogate loss
+│   │   ├── grpo.py                    # Group Relative Policy Optimization
+│   │   └── custom.py                  # User-defined scalar loss
+│   ├── utils/
+│   │   ├── gpu.py                     # GPU memory tracking, device selection
+│   │   ├── tokenizer.py              # Tokenizer helpers, chat templates
+│   │   ├── logging.py                # CSV / W&B / TensorBoard logging
+│   │   └── logprobs.py               # Per-token log-probability extraction
+│   └── cli/
+│       └── main.py                    # CLI entrypoint (run, models, info, checkpoint)
+├── cookbook/
+│   ├── supervised.py                  # SupervisedDataset, ChatDatasetBuilder
+│   ├── rl.py                          # Env, MessageEnv, ProblemEnv, rollout
+│   ├── preference.py                  # Comparison, PreferenceDataset
+│   ├── renderers.py                   # Llama3/Qwen/Mistral chat renderers
+│   ├── completers.py                  # TokenCompleter, MessageCompleter
+│   └── recipes/
+│       ├── chat_sft.py                # End-to-end chat SFT
+│       ├── math_rl.py                 # Math RL with verifier rewards
+│       ├── code_rl.py                 # Code RL with execution rewards
+│       ├── dpo_preference.py          # DPO preference tuning
+│       └── distillation.py            # Knowledge distillation
 ├── examples/
-│   └── hello_tinker.py                # Minimal end-to-end example
-└── tests/                             # 68 tests, 100% coverage
+│   ├── hello_tinker.py                # Minimal end-to-end example
+│   ├── sft_alpaca.py                  # SFT on Alpaca dataset
+│   ├── rl_gsm8k.py                    # RL on GSM8K math problems
+│   └── dpo_ultrafeedback.py           # DPO on preference data
+└── tests/                             # 179 tests, high coverage
     ├── test_types.py
     ├── test_losses.py
     ├── test_training_client.py
     ├── test_sampling_client.py
-    └── test_service_client.py
+    ├── test_service_client.py
+    ├── test_checkpoint.py
+    ├── test_weights.py
+    ├── test_model_registry.py
+    ├── test_utils.py
+    ├── test_cookbook.py
+    └── test_cli.py
 ```
 
 ---
@@ -380,7 +473,102 @@ uv run python examples/hello_tinker.py
 | Quantization | `bitsandbytes` | 4-bit / 8-bit QLoRA |
 | Tensor ops | `torch` | Autograd, optimizer, GPU memory |
 | Config | `pydantic` v2 | Typed, validated config objects |
+| CLI | `typer` | CLI commands (run, models, checkpoint) |
 | Packaging | `pyproject.toml` + `uv` | Distribution |
+
+---
+
+## CLI
+
+```bash
+# List supported models with VRAM requirements
+local-tinker models
+
+# Show GPU info and recommended models
+local-tinker info
+
+# Run a training script
+local-tinker run examples/hello_tinker.py
+
+# Checkpoint management
+local-tinker checkpoint list ./checkpoints
+local-tinker checkpoint inspect ./checkpoints/step-100
+local-tinker checkpoint export ./checkpoints/step-100 --format lora
+```
+
+---
+
+## Checkpoint & Weight Management
+
+```python
+from local_tinker.checkpoint import save_checkpoint, load_checkpoint, list_checkpoints
+from local_tinker.weights import merge_and_save, export_lora, push_to_hub
+
+# Save checkpoint (LoRA weights + optimizer + metadata)
+save_checkpoint(tc, "./checkpoints/step-100", metadata={"eval_loss": 0.42})
+
+# Load checkpoint
+meta = load_checkpoint(tc, "./checkpoints/step-100")
+
+# List all checkpoints
+for ckpt in list_checkpoints("./checkpoints"):
+    print(f"Step {ckpt.step}: {ckpt.metadata}")
+
+# Auto-checkpointing (on TrainingClient)
+tc = run.training_client()
+tc._auto_checkpoint_every = 50  # checkpoint every 50 steps
+tc._checkpoint_dir = "./checkpoints"
+tc._max_checkpoints = 3  # keep only latest 3
+
+# Merge LoRA into base model and save
+merge_and_save(tc, "./merged-model")
+
+# Export just the lightweight LoRA adapter
+export_lora(tc, "./lora-adapter")
+
+# Push merged model to HuggingFace Hub
+push_to_hub(tc, "my-username/my-model", private=True)
+```
+
+---
+
+## Cookbook
+
+The `cookbook/` module provides high-level abstractions for common tasks:
+
+```python
+# Supervised fine-tuning
+from cookbook.supervised import SupervisedDataset, ChatDatasetBuilder
+dataset = SupervisedDataset.from_jsonl("data.jsonl", tokenizer)
+for batch in dataset.batch(4):
+    tc.forward_backward(batch, CrossEntropyLoss())
+    tc.optim_step(AdamParams(lr=2e-4))
+
+# RL training
+from cookbook.rl import ProblemEnv, rollout, compute_advantages
+env = ProblemEnv(problems, extract_answer_fn=extract_number)
+trajectories = [rollout(env, sc, tokenizer) for _ in range(8)]
+data = compute_advantages(trajectories, tokenizer, method="grpo")
+
+# DPO preference tuning
+from cookbook.preference import PreferenceDataset
+dataset = PreferenceDataset.from_jsonl("prefs.jsonl", tokenizer)
+
+# Chat completion
+from cookbook.completers import MessageCompleter
+completer = MessageCompleter(sc, tokenizer)
+response = completer.complete([{"role": "user", "content": "Hello!"}])
+```
+
+### Ready-to-run Recipes
+
+| Recipe | Script | Description |
+|---|---|---|
+| Chat SFT | `cookbook/recipes/chat_sft.py` | Fine-tune on chat conversations |
+| Math RL | `cookbook/recipes/math_rl.py` | RL on math problems with verifier |
+| Code RL | `cookbook/recipes/code_rl.py` | RL on code with execution rewards |
+| DPO | `cookbook/recipes/dpo_preference.py` | DPO preference tuning |
+| Distillation | `cookbook/recipes/distillation.py` | KL distillation from larger model |
 
 ---
 
@@ -397,11 +585,11 @@ uv run python examples/hello_tinker.py
 ## Roadmap
 
 - [x] **Phase 1**: Core primitives (ServiceClient, TrainingClient, SamplingClient, CrossEntropyLoss)
-- [ ] **Phase 2**: RL loss functions (PPO, GRPO, DPO) + reference model support
-- [ ] **Phase 3**: Checkpoint management + weight export/merge
-- [ ] **Phase 4**: Cookbook (datasets, RL environments, recipes)
-- [ ] **Phase 5**: CLI + GPU utilities + model registry
-- [ ] **Phase 6**: Comprehensive docs
+- [x] **Phase 2**: RL loss functions (PPO, GRPO, DPO, CustomLoss) + reference model support
+- [x] **Phase 3**: Checkpoint management + weight export/merge/push to Hub
+- [x] **Phase 4**: Cookbook (datasets, RL environments, renderers, completers, 5 recipes)
+- [x] **Phase 5**: CLI (run, models, info, checkpoint) + GPU utilities + model registry + logging
+- [x] **Phase 6**: 179 tests across 11 test modules
 
 ---
 

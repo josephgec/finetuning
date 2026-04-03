@@ -252,6 +252,83 @@ class TestSaveLoadWeights:
         )
 
 
+class TestAutoCheckpoint:
+    def test_auto_checkpoint_triggers(self):
+        tc = _make_client()
+        tc._auto_checkpoint_every = 2
+        tc._checkpoint_dir = None  # Will be set below
+
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tc._checkpoint_dir = tmpdir
+            data = [Datum(input_ids=[1, 2, 3], labels=[1, 2, 3])]
+
+            # Step 1: no checkpoint
+            tc.forward_backward(data, CrossEntropyLoss())
+            tc.optim_step(AdamParams(lr=1e-3))
+            ckpts = list(Path(tmpdir).iterdir())
+            assert len(ckpts) == 0
+
+            # Step 2: checkpoint fires
+            tc.forward_backward(data, CrossEntropyLoss())
+            tc.optim_step(AdamParams(lr=1e-3))
+            ckpts = [d for d in Path(tmpdir).iterdir() if d.is_dir()]
+            assert len(ckpts) == 1
+
+    def test_auto_checkpoint_rotates(self):
+        tc = _make_client()
+        tc._auto_checkpoint_every = 1
+        tc._max_checkpoints = 2
+
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tc._checkpoint_dir = tmpdir
+            data = [Datum(input_ids=[1, 2, 3], labels=[1, 2, 3])]
+
+            for _ in range(5):
+                tc.forward_backward(data, CrossEntropyLoss())
+                tc.optim_step(AdamParams(lr=1e-3))
+
+            ckpts = [d for d in Path(tmpdir).iterdir() if d.is_dir()]
+            assert len(ckpts) <= 2
+
+    def test_no_auto_checkpoint_when_disabled(self):
+        tc = _make_client()
+        # auto_checkpoint_every defaults to None
+        data = [Datum(input_ids=[1, 2, 3], labels=[1, 2, 3])]
+        tc.forward_backward(data, CrossEntropyLoss())
+        tc.optim_step(AdamParams(lr=1e-3))
+        # Should not raise or create checkpoints
+
+
+class TestGetReferenceLogProbs:
+    def test_returns_tensor(self):
+        tc = _make_client()
+        data = [Datum(input_ids=[1, 2, 3], labels=[1, 2, 3])]
+        result = tc.get_reference_log_probs(data)
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (1, 3)
+
+    def test_values_are_log_probs(self):
+        tc = _make_client()
+        data = [Datum(input_ids=[1, 2, 3], labels=[1, 2, 3])]
+        result = tc.get_reference_log_probs(data)
+        assert (result <= 0).all()
+
+    def test_batch(self):
+        tc = _make_client()
+        data = [
+            Datum(input_ids=[1, 2, 3], labels=[1, 2, 3]),
+            Datum(input_ids=[4, 5, 6], labels=[4, 5, 6]),
+        ]
+        result = tc.get_reference_log_probs(data)
+        assert result.shape == (2, 3)
+
+
 class TestEndToEndTraining:
     def test_loss_decreases_over_steps(self):
         """Verify that repeated training on the same data reduces loss."""
