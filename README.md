@@ -13,7 +13,7 @@ Inspired by [Thinking Machines' Tinker API](https://tinker-docs.thinkingmachines
 ```mermaid
 graph TB
     subgraph User Code
-        Script["Training Script<br/>(hello_tinker.py)"]
+        Script["Training Script"]
     end
 
     subgraph Local Tinker API
@@ -25,19 +25,19 @@ graph TB
     end
 
     subgraph Backend
-        HF["HuggingFace<br/>Transformers"]
-        PEFT["PEFT<br/>(LoRA)"]
-        BNB["bitsandbytes<br/>(QLoRA)"]
+        HF["HuggingFace Transformers"]
+        PEFT["PEFT / LoRA"]
+        BNB["bitsandbytes / QLoRA"]
         GPU["Local GPU"]
     end
 
     Script --> SC
     SC -->|create_training_run| TR
-    TR -->|.training_client()| TC
-    TR -->|.sampling_client()| SaC
+    TR -->|training_client| TC
+    TR -->|sampling_client| SaC
     TC -->|forward_backward| LF
     TC -->|optim_step| GPU
-    SaC -->|sample / batch_sample| GPU
+    SaC -->|sample| GPU
     SC --> HF
     SC --> PEFT
     SC --> BNB
@@ -54,31 +54,31 @@ sequenceDiagram
     participant TR as TrainingRun
     participant TC as TrainingClient
     participant Sa as SamplingClient
-    participant M as Model (GPU)
+    participant M as Model on GPU
 
-    U->>SC: ServiceClient(device="auto")
-    U->>SC: create_training_run(model, lora_config)
+    U->>SC: create ServiceClient
+    U->>SC: create_training_run
     SC->>M: Load model + LoRA adapter
     SC-->>U: TrainingRun
 
-    U->>TR: .training_client()
+    U->>TR: training_client
     TR-->>U: TrainingClient
-    U->>TR: .sampling_client()
+    U->>TR: sampling_client
     TR-->>U: SamplingClient
 
     loop Training Steps
-        U->>TC: forward_backward(data, loss_fn)
-        TC->>M: model.train() → forward → loss → backward
-        TC-->>U: ForwardBackwardOutput(loss, num_tokens, grad_norm)
+        U->>TC: forward_backward
+        TC->>M: train, forward, loss, backward
+        TC-->>U: ForwardBackwardOutput
 
-        U->>TC: optim_step(AdamParams)
-        TC->>M: optimizer.step() → zero_grad()
-        TC-->>U: OptimStepResponse(step, lr)
+        U->>TC: optim_step
+        TC->>M: optimizer step + zero grad
+        TC-->>U: OptimStepResponse
     end
 
-    U->>Sa: sample(prompt, params)
-    Sa->>M: model.eval() → generate()
-    Sa-->>U: SampleResponse(tokens, text, log_probs)
+    U->>Sa: sample
+    Sa->>M: eval + generate
+    Sa-->>U: SampleResponse
 ```
 
 ## Gradient Accumulation (Two-Phase Design)
@@ -93,7 +93,7 @@ graph LR
     end
 
     subgraph "Phase 2: Apply"
-        G --> OS["optim_step<br/>(Adam)"]
+        G --> OS["optim_step<br/>Adam optimizer"]
         OS --> ZG["zero_grad"]
     end
 ```
@@ -104,29 +104,25 @@ graph LR
 classDiagram
     class LossFunction {
         <<abstract>>
-        +compute(logits, labels, **kwargs) Tensor
+        +compute&#40;logits, labels&#41; Tensor
     }
     class CrossEntropyLoss {
-        +mask_prompt_tokens: bool
-        +compute(logits, labels) Tensor
+        +mask_prompt_tokens bool
+        +compute&#40;logits, labels&#41; Tensor
     }
     class PPOLoss {
-        +clip_range: float
-        +kl_coeff: float
-        +compute(logits, labels, old_log_probs, advantages) Tensor
+        +clip_range float
+        +kl_coeff float
     }
     class GRPOLoss {
-        +clip_range: float
-        +kl_coeff: float
-        +compute(logits, labels, old_log_probs, rewards, group_size) Tensor
+        +clip_range float
+        +kl_coeff float
     }
     class DPOLoss {
-        +beta: float
-        +compute(logits, labels, ref_chosen_log_probs, ref_rejected_log_probs) Tensor
+        +beta float
     }
     class CustomLoss {
-        +fn: Callable
-        +compute(logits, labels) Tensor
+        +fn Callable
     }
 
     LossFunction <|-- CrossEntropyLoss
@@ -141,19 +137,19 @@ classDiagram
 ```mermaid
 graph LR
     subgraph "1. Rollout"
-        E["Environment<br/>(ProblemEnv)"] -->|observation| SC["SamplingClient<br/>.sample()"]
+        E["Environment<br/>ProblemEnv"] -->|observation| SC["SamplingClient<br/>sample"]
         SC -->|action| E
         E -->|reward| T["Trajectory"]
     end
 
     subgraph "2. Advantage"
-        T --> CA["compute_advantages<br/>(GRPO)"]
-        CA --> D["Training Data<br/>(list[Datum])"]
+        T --> CA["compute_advantages<br/>GRPO"]
+        CA --> D["Training Data"]
     end
 
     subgraph "3. Policy Update"
-        D --> FB["TrainingClient<br/>.forward_backward()"]
-        FB --> OS["TrainingClient<br/>.optim_step()"]
+        D --> FB["TrainingClient<br/>forward_backward"]
+        FB --> OS["TrainingClient<br/>optim_step"]
     end
 ```
 
