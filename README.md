@@ -1,5 +1,7 @@
 # Local Tinker
 
+> **Writeup:** [Local fine-tuning with a Tinker-style API](https://jthomas.site/blog/finetuning.html)
+
 **Tinker-style API for local LoRA fine-tuning of small language models (1B–13B) on a single GPU.**
 
 Local Tinker gives you clean, high-level primitives — `forward_backward`, `optim_step`, `sample` — for fine-tuning open-weight LLMs on your own hardware. It handles model loading, LoRA management, gradient accumulation, and inference internally so you can focus on writing training loops.
